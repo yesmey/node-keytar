@@ -68,4 +68,15 @@ describe("keytar", function() {
       assert.equal(await keytar.findPassword(service), null)
     })
   })
+
+  describe("error handling", function() {
+    it("should gracefully handle an error serializing an object", async function() {
+      let obj = {}
+      obj.toString = function(){
+        throw new Error('Whoops! Time to seg fault');
+      }
+      await keytar.setPassword(service, account, obj);
+      assert.equal(await keytar.deletePassword(service, account), false)
+    })
+  })
 })
