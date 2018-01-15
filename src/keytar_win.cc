@@ -4,155 +4,129 @@
 
 #include <windows.h>
 #include <wincred.h>
+#include <memory>
+#include <utility>
 
 #include "credentials.h"
 
 namespace keytar {
 
-LPWSTR utf8ToWideChar(std::string utf8) {
-  int wide_char_length = MultiByteToWideChar(CP_UTF8,
-                                             0,
-                                             utf8.c_str(),
-                                             -1,
-                                             NULL,
-                                             0);
-  if (wide_char_length == 0) {
-    return NULL;
-  }
+std::unique_ptr<wchar_t[]> utf8ToWideChar(const std::string& utf8) {
+  int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), NULL, 0);
+  if (size == 0)
+    return nullptr;
 
-  LPWSTR result = new WCHAR[wide_char_length];
-  if (MultiByteToWideChar(CP_UTF8,
-                          0,
-                          utf8.c_str(),
-                          -1,
-                          result,
-                          wide_char_length) == 0) {
-    delete[] result;
-    return NULL;
-  }
+  std::unique_ptr<wchar_t[]> ret(new wchar_t[size + 1]);
+  if (MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), (int)utf8.size(), ret.get(), size) == 0)
+    return nullptr;
 
-  return result;
+  ret[size] = '\0';
+  return ret;
 }
 
 std::string wideCharToAnsi(LPWSTR wide_char) {
-  if (wide_char == NULL) {
-    return std::string();
-  }
+  if (wide_char == nullptr)
+    return nullptr;
 
-  int ansi_length = WideCharToMultiByte(CP_ACP,
-                                        0,
-                                        wide_char,
-                                        -1,
-                                        NULL,
-                                        0,
-                                        NULL,
-                                        NULL);
-  if (ansi_length == 0) {
-    return std::string();
-  }
+  int size = WideCharToMultiByte(CP_ACP, 0, wide_char, -1, NULL, 0, NULL, NULL);
+  if (size == 0)
+    return nullptr;
 
-  char* buffer = new char[ansi_length];
-  if (WideCharToMultiByte(CP_ACP,
-                          0,
-                          wide_char,
-                          -1,
-                          buffer,
-                          ansi_length,
-                          NULL,
-                          NULL) == 0) {
-    delete[] buffer;
-    return std::string();
-  }
+  std::unique_ptr<char[]> ret(new char[size + 1]);
+  if (WideCharToMultiByte(CP_ACP, 0, wide_char, -1, ret.get(), size, NULL, NULL) == 0)
+    return nullptr;
 
-  std::string result = std::string(buffer);
-  delete[] buffer;
-  return result;
+  ret[size] = '\0';
+  return ret.get();
 }
 
 std::string getErrorMessage(DWORD errorCode) {
   LPWSTR errBuffer;
-  ::FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
+  DWORD ret = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM,
                   NULL, errorCode, 0, (LPWSTR) &errBuffer, 0, NULL);
-  std::string errMsg = wideCharToAnsi(errBuffer);
-  LocalFree(errBuffer);
-  return errMsg;
+  if (ret) {
+    std::string errMsg = wideCharToAnsi(errBuffer);
+    LocalFree(errBuffer);
+    return errMsg;
+  }
+  return "Unknown error";
 }
 
 KEYTAR_OP_RESULT SetPassword(const std::string& service,
-                 const std::string& account,
-                 const std::string& password,
-                 std::string* errStr) {
-  LPWSTR target_name = utf8ToWideChar(service + '/' + account);
-  if (target_name == NULL) {
+                             const std::string& account,
+                             const std::string& password,
+                             std::string* errStr) {
+  std::unique_ptr<wchar_t[]> target_uni = utf8ToWideChar(service + '/' + account);
+  if (target_uni == nullptr) {
+    errStr = "Could not decode parameter: service or/and account";
     return FAIL_ERROR;
   }
 
-  LPWSTR user_name = utf8ToWideChar(account);
-  if (target_name == NULL) {
+  std::unique_ptr<wchar_t[]> account_uni = utf8ToWideChar(account);
+  if (target_uni == nullptr) {
+    errStr = "Could not decode parameter: account";
     return FAIL_ERROR;
   }
 
   CREDENTIAL cred = { 0 };
   cred.Type = CRED_TYPE_GENERIC;
-  cred.TargetName = target_name;
-  cred.UserName = user_name;
+  cred.TargetName = target_uni.get();
+  cred.UserName = account_uni.get();
   cred.CredentialBlobSize = password.size();
   cred.CredentialBlob = (LPBYTE)(password.data());
   cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
 
   bool result = ::CredWrite(&cred, 0);
-  delete[] target_name;
   if (!result) {
     *errStr = getErrorMessage(::GetLastError());
     return FAIL_ERROR;
-  } else {
-    return SUCCESS;
   }
+  return SUCCESS;
 }
 
 KEYTAR_OP_RESULT GetPassword(const std::string& service,
-                 const std::string& account,
-                 std::string* password,
-                 std::string* errStr) {
-  LPWSTR target_name = utf8ToWideChar(service + '/' + account);
-  if (target_name == NULL) {
+                             const std::string& account,
+                             std::string* password,
+                             std::string* errStr) {
+  std::unique_ptr<wchar_t[]> target_uni = utf8ToWideChar(service + '/' + account);
+  if (target_uni == nullptr) {
     return FAIL_ERROR;
   }
 
   CREDENTIAL* cred;
-  bool result = ::CredRead(target_name, CRED_TYPE_GENERIC, 0, &cred);
-  delete[] target_name;
+  bool result = ::CredRead(target_uni.get(), CRED_TYPE_GENERIC, 0, &cred);
   if (!result) {
     DWORD code = ::GetLastError();
     if (code == ERROR_NOT_FOUND) {
       return FAIL_NONFATAL;
-    } else {
+    }
+    else {
       *errStr = getErrorMessage(code);
       return FAIL_ERROR;
     }
   }
 
-  *password = std::string(reinterpret_cast<char*>(cred->CredentialBlob),
-                          cred->CredentialBlobSize);
+  *password = std::string(reinterpret_cast<char*>(cred->CredentialBlob), cred->CredentialBlobSize);
   ::CredFree(cred);
   return SUCCESS;
 }
 
 KEYTAR_OP_RESULT DeletePassword(const std::string& service,
-                    const std::string& account,
-                    std::string* errStr) {
-  LPWSTR target_name = utf8ToWideChar(service + '/' + account);
-  if (target_name == NULL) {
+                                const std::string& account,
+                                std::string* errStr) {
+  std::unique_ptr<wchar_t[]> target_uni = utf8ToWideChar(service + '/' + account);
+  if (target_uni == nullptr) {
+    errStr = "Could not decode parameter: service and/or account";
     return FAIL_ERROR;
   }
 
-  bool result = ::CredDelete(target_name, CRED_TYPE_GENERIC, 0);
-  delete[] target_name;
+  bool result = ::CredDelete(target_uni.get(), CRED_TYPE_GENERIC, 0);
   if (!result) {
     DWORD code = ::GetLastError();
     if (code == ERROR_NOT_FOUND) {
       return FAIL_NONFATAL;
-    } else {
+    }
+    else {
       *errStr = getErrorMessage(code);
       return FAIL_ERROR;
     }
@@ -162,29 +136,29 @@ KEYTAR_OP_RESULT DeletePassword(const std::string& service,
 }
 
 KEYTAR_OP_RESULT FindPassword(const std::string& service,
-                  std::string* password,
-                  std::string* errStr) {
-  LPWSTR filter = utf8ToWideChar(service + "*");
-  if (filter == NULL) {
+                              std::string* password,
+                              std::string* errStr) {
+  std::unique_ptr<wchar_t[]> filter_uni = utf8ToWideChar(service + "*");
+  if (filter_uni == nullptr) {
+    errStr = "Could not decode parameter: service";
     return FAIL_ERROR;
   }
 
   DWORD count;
   CREDENTIAL** creds;
-  bool result = ::CredEnumerate(filter, 0, &count, &creds);
-  delete[] filter;
+  bool result = ::CredEnumerate(filter_uni.get(), 0, &count, &creds);
   if (!result) {
     DWORD code = ::GetLastError();
     if (code == ERROR_NOT_FOUND) {
       return FAIL_NONFATAL;
-    } else {
+    }
+    else {
       *errStr = getErrorMessage(code);
       return FAIL_ERROR;
     }
   }
 
-  *password = std::string(reinterpret_cast<char*>(creds[0]->CredentialBlob),
-                          creds[0]->CredentialBlobSize);
+  *password = std::string(reinterpret_cast<char*>(creds[0]->CredentialBlob), creds[0]->CredentialBlobSize);
   ::CredFree(creds);
   return SUCCESS;
 }
@@ -192,17 +166,21 @@ KEYTAR_OP_RESULT FindPassword(const std::string& service,
 KEYTAR_OP_RESULT FindCredentials(const std::string& service,
                                  std::vector<Credentials>* credentials,
                                  std::string* errStr) {
-  LPWSTR filter = utf8ToWideChar(service + "*");
+  std::unique_ptr<wchar_t[]> filter_uni = utf8ToWideChar(service + "*");
+  if (filter_uni == nullptr) {
+    errStr = "Could not decode parameter: service";
+    return FAIL_ERROR;
+  }
 
   DWORD count;
   CREDENTIAL **creds;
-
-  bool result = ::CredEnumerate(filter, 0, &count, &creds);
+  bool result = ::CredEnumerate(filter_uni.get(), 0, &count, &creds);
   if (!result) {
     DWORD code = ::GetLastError();
     if (code == ERROR_NOT_FOUND) {
       return FAIL_NONFATAL;
-    } else {
+    }
+    else {
       *errStr = getErrorMessage(code);
       return FAIL_ERROR;
     }
@@ -210,21 +188,17 @@ KEYTAR_OP_RESULT FindCredentials(const std::string& service,
 
   for (unsigned int i = 0; i < count; ++i) {
     CREDENTIAL* cred = creds[i];
-
-    if (cred->UserName == NULL || cred->CredentialBlobSize == NULL) {
+    if (cred->UserName == NULL || cred->CredentialBlob == NULL) {
       continue;
     }
 
     std::string login = wideCharToAnsi(cred->UserName);
-    std::string password(reinterpret_cast<char*>(cred->CredentialBlob));
-
-    credentials->push_back(Credentials(login, password));
+    std::string password(reinterpret_cast<char*>(cred->CredentialBlob), cred->CredentialBlobSize);
+    credentials->push_back(std::make_pair(login, password));
   }
 
   CredFree(creds);
-
   return SUCCESS;
 }
-
 
 }  // namespace keytar
